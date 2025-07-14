@@ -196,23 +196,30 @@ async function run() {
         sort = "createdAt",
         status = "accepted",
       } = req.query;
-
+    
       const skip = (parseInt(page) - 1) * parseInt(limit);
-
+    
       const query = {
         ...(status !== "all" ? { status } : {}),
         ...(search ? { tags: { $regex: search, $options: "i" } } : {}),
       };
-
+    
       const result = await products
         .find(query)
         .sort({ [sort]: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .toArray();
-
-      res.send(result);
+    
+      // This is the important part for pagination!
+      const total = await products.countDocuments(query);
+    
+      res.send({
+        data: result,
+        total,
+      });
     });
+    
     app.get("/products/reported", verifyJWT, async (req, res) => {
       try {
         const productsReported = await products.find({ reported: true }).toArray();
@@ -294,14 +301,24 @@ async function run() {
       );
       res.send(result);
     });
-
     app.put("/products/:id", verifyJWT, async (req, res) => {
-      const objectId = createObjectId(req.params.id);
-      if (!objectId)
-        return res.status(400).send({ error: true, message: "Invalid ID format" });
-
-      const result = await products.updateOne({ _id: objectId }, { $set: req.body });
-      res.send(result);
+      const productId = req.params.id;
+      const updatedData = req.body;
+    
+      try {
+        const result = await products.updateOne(
+          { _id: new ObjectId(productId) },
+          { $set: updatedData }
+        );
+    
+        if (result.modifiedCount > 0) {
+          res.send({ success: true, message: "Product updated successfully." });
+        } else {
+          res.send({ success: false, message: "No changes were made or product not found." });
+        }
+      } catch (error) {
+        res.status(500).send({ success: false, message: "Update failed.", error });
+      }
     });
 
     // Report product
