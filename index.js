@@ -1080,6 +1080,271 @@ app.post("/coupons/validate", async (req, res) => {
         res.status(500).send({ error: true, message: "Failed to fetch statistics" });
       }
     });
+
+    // Moderator Dashboard Endpoints
+    
+    // 1. GET /moderator/stats - Main moderator statistics
+    app.get("/moderator/stats", verifyJWT, async (req, res) => {
+      try {
+        // Check if the user role is moderator or admin
+        if (req.user.role !== "moderator" && req.user.role !== "admin") {
+          return res.status(403).send({ error: true, message: "Forbidden: Moderators only" });
+        }
+
+        // Get pending reviews count
+        const pendingReviews = await products.countDocuments({ status: "pending" });
+        
+        // Get reported contents count
+        const reportedContents = await products.countDocuments({ reported: true });
+        
+        // Get total moderated items (products that have been reviewed)
+        const totalModerated = await products.countDocuments({ 
+          $or: [
+            { status: "accepted" },
+            { status: "rejected" }
+          ]
+        });
+
+        // Calculate average response time (time from submission to moderation)
+        const moderatedProducts = await products.find({
+          $or: [
+            { status: "accepted" },
+            { status: "rejected" }
+          ],
+          moderatedAt: { $exists: true }
+        }).toArray();
+
+        let avgResponseTime = 0;
+        if (moderatedProducts.length > 0) {
+          const totalTime = moderatedProducts.reduce((sum, product) => {
+            if (product.createdAt && product.moderatedAt) {
+              return sum + (new Date(product.moderatedAt) - new Date(product.createdAt));
+            }
+            return sum;
+          }, 0);
+          avgResponseTime = Math.round(totalTime / moderatedProducts.length / (1000 * 60 * 60)); // Convert to hours
+        }
+
+        res.send({
+          success: true,
+          stats: {
+            pendingReviews,
+            reportedContents,
+            totalModerated,
+            avgResponseTime
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching moderator stats:", error);
+        res.status(500).send({ error: true, message: "Failed to fetch moderator statistics" });
+      }
+    });
+
+    // 2. GET /moderator/review-queue/stats - Review queue statistics
+    app.get("/moderator/review-queue/stats", verifyJWT, async (req, res) => {
+      try {
+        // Check if the user role is moderator or admin
+        if (req.user.role !== "moderator" && req.user.role !== "admin") {
+          return res.status(403).send({ error: true, message: "Forbidden: Moderators only" });
+        }
+
+        // Get pending products count
+        const pendingProducts = await products.countDocuments({ status: "pending" });
+        
+        // Get pending reviews count (reviews that need moderation)
+        const pendingReviews = await reviews.countDocuments({ 
+          $or: [
+            { status: "pending" },
+            { status: { $exists: false } }
+          ]
+        });
+
+        // Get urgent items (items reported multiple times or pending for too long)
+        const now = new Date();
+        const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+        
+        const urgentItems = await products.countDocuments({
+          $or: [
+            { reportCount: { $gte: 3 } }, // Items reported 3+ times
+            { 
+              status: "pending", 
+              createdAt: { $lte: threeDaysAgo } // Pending for 3+ days
+            }
+          ]
+        });
+
+        res.send({
+          success: true,
+          stats: {
+            pendingProducts,
+            pendingReviews,
+            urgentItems
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching review queue stats:", error);
+        res.status(500).send({ error: true, message: "Failed to fetch review queue statistics" });
+      }
+    });
+
+    // 3. GET /moderator/reported/stats - Reported content statistics
+    app.get("/moderator/reported/stats", verifyJWT, async (req, res) => {
+      try {
+        // Check if the user role is moderator or admin
+        if (req.user.role !== "moderator" && req.user.role !== "admin") {
+          return res.status(403).send({ error: true, message: "Forbidden: Moderators only" });
+        }
+
+        // Get total reports count
+        const totalReports = await products.countDocuments({ reported: true });
+        
+        // Get resolved reports count (reports that have been handled)
+        const resolvedReports = await products.countDocuments({ 
+          reported: true,
+          $or: [
+            { status: "accepted" },
+            { status: "rejected" }
+          ]
+        });
+        
+        // Get pending reports count
+        const pendingReports = await products.countDocuments({ 
+          reported: true,
+          status: "pending"
+        });
+
+        // Get report types breakdown
+        const reportTypes = await products.aggregate([
+          { $match: { reported: true } },
+          { $group: { 
+            _id: "$reportReason", 
+            count: { $sum: 1 } 
+          }},
+          { $sort: { count: -1 } }
+        ]).toArray();
+
+        const reportTypesFormatted = reportTypes.map(type => ({
+          reason: type._id || "General",
+          count: type.count
+        }));
+
+        res.send({
+          success: true,
+          stats: {
+            totalReports,
+            resolvedReports,
+            pendingReports,
+            reportTypes: reportTypesFormatted
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching reported stats:", error);
+        res.status(500).send({ error: true, message: "Failed to fetch reported content statistics" });
+      }
+    });
+
+    // 4. GET /moderator/activity - Moderator activity feed
+    app.get("/moderator/activity", verifyJWT, async (req, res) => {
+      try {
+        // Check if the user role is moderator or admin
+        if (req.user.role !== "moderator" && req.user.role !== "admin") {
+          return res.status(403).send({ error: true, message: "Forbidden: Moderators only" });
+        }
+
+        const { page = 1, limit = 20 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        // Get recent products that need moderation
+        const recentPendingProducts = await products
+          .find({ status: "pending" })
+          .sort({ createdAt: 1 }) // Oldest first for priority
+          .limit(parseInt(limit))
+          .toArray();
+
+        // Get recently reported products
+        const recentReportedProducts = await products
+          .find({ reported: true, status: "pending" })
+          .sort({ reportCount: -1, createdAt: 1 }) // Most reported first
+          .limit(parseInt(limit))
+          .toArray();
+
+        // Get recent reviews that need moderation
+        const recentPendingReviews = await reviews
+          .find({ 
+            $or: [
+              { status: "pending" },
+              { status: { $exists: false } }
+            ]
+          })
+          .sort({ createdAt: 1 })
+          .limit(parseInt(limit))
+          .toArray();
+
+        // Combine and format activities with priority levels
+        const allActivities = [
+          ...recentReportedProducts.map(product => ({
+            id: product._id.toString(),
+            type: "reported_product",
+            title: `Reported: ${product.name || product.title || "Product"}`,
+            description: `Reported ${product.reportCount || 0} times by users`,
+            timestamp: product.createdAt,
+            priority: product.reportCount >= 3 ? "high" : product.reportCount >= 2 ? "medium" : "low"
+          })),
+          ...recentPendingProducts.map(product => ({
+            id: product._id.toString(),
+            type: "pending_product",
+            title: `Pending Review: ${product.name || product.title || "Product"}`,
+            description: `Submitted by ${product.ownerEmail || "Unknown"}`,
+            timestamp: product.createdAt,
+            priority: new Date() - new Date(product.createdAt) > 3 * 24 * 60 * 60 * 1000 ? "high" : "low"
+          })),
+          ...recentPendingReviews.map(review => ({
+            id: review._id.toString(),
+            type: "pending_review",
+            title: `Pending Review: ${review.productName || "Product Review"}`,
+            description: `Review by ${review.userEmail || "Unknown"}`,
+            timestamp: review.createdAt,
+            priority: "low"
+          }))
+        ].sort((a, b) => {
+          // Sort by priority first, then by timestamp
+          const priorityOrder = { high: 3, medium: 2, low: 1 };
+          if (priorityOrder[a.priority] !== priorityOrder[b.priority]) {
+            return priorityOrder[b.priority] - priorityOrder[a.priority];
+          }
+          return new Date(a.timestamp) - new Date(b.timestamp);
+        });
+
+        // Apply pagination
+        const paginatedActivities = allActivities.slice(skip, skip + parseInt(limit));
+
+        // Get total count for pagination
+        const totalPendingProducts = await products.countDocuments({ status: "pending" });
+        const totalReportedProducts = await products.countDocuments({ reported: true, status: "pending" });
+        const totalPendingReviews = await reviews.countDocuments({ 
+          $or: [
+            { status: "pending" },
+            { status: { $exists: false } }
+          ]
+        });
+        const totalActivities = totalPendingProducts + totalReportedProducts + totalPendingReviews;
+
+        res.send({
+          success: true,
+          activities: paginatedActivities,
+          pagination: {
+            currentPage: parseInt(page),
+            totalPages: Math.ceil(totalActivities / parseInt(limit)),
+            totalActivities,
+            hasNextPage: parseInt(page) * parseInt(limit) < totalActivities,
+            hasPrevPage: parseInt(page) > 1
+          }
+        });
+      } catch (error) {
+        console.error("Error fetching moderator activity:", error);
+        res.status(500).send({ error: true, message: "Failed to fetch moderator activity" });
+      }
+    });
     
     // Root route
     app.get("/", (_, res) => res.send("✅ AppOrbit Backend Running"));
